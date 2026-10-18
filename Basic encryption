@@ -301,12 +301,12 @@ local function mixColumns(state: {{number}}, inv: boolean)
             local v = 0
             if inv then
                 for k = 0, 3 do
-                    v = bit32.bxor(v, mul(a[(r + k) % 4], INV_M[r + 1][k + 1]))
+                    v = bit32.bxor(v, mul(a[(r + k) % 4 + 1], INV_M[r + 1][k + 1]))
                 end
             else
                 local m: {number} = {2, 3, 1, 1}
                 for k = 0, 3 do
-                    v = bit32.bxor(v, mul(a[(r + k) % 4], m[k + 1]))
+                    v = bit32.bxor(v, mul(a[(r + k) % 4 + 1], m[k + 1]))
                 end
             end
             state[c][r] = v
