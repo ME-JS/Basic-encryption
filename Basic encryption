@@ -1,297 +1,280 @@
---!strict
-local SecureCrypto = {}
+local Obfuscator = {}
 
-type RandomSource = (number) -> string
-
-local randomSource: RandomSource? = nil
-local rng: Random? = nil
-
-local function getRng(): RandomSource
-    if randomSource then
-        return randomSource :: RandomSource
-    end
-    if not rng then
-        rng = Random.new()
-    end
-    local r = rng :: Random
-    return function(n: number): string
-        local t: {string} = {}
-        for i = 1, n do
-            t[i] = string.char(r:NextInteger(0, 255))
-        end
-        return table.concat(t)
-    end
-end
-
-function SecureCrypto.setRandomSource(fn: RandomSource?)
-    assert(type(fn) == "function" or fn == nil)
-    randomSource = fn
-end
-
-local function hexToBytes(hex: string): string
-    return (hex:gsub("%x%x", function(h: string): string
-        return string.char(tonumber(h, 16) :: number)
-    end))
-end
-
-local function bytesToHex(s: string): string
-    return (s:gsub(".", function(c: string): string
-        return string.format("%02x", string.byte(c) :: number)
-    end))
-end
-
-local K: {number} = {
-    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
-    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
-    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
-    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
-    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
-    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
-    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
-    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+local KEYWORDS = {
+    ["and"] = true, ["break"] = true, ["do"] = true,
+    ["else"] = true, ["elseif"] = true, ["end"] = true,
+    ["false"] = true, ["for"] = true, ["function"] = true,
+    ["if"] = true, ["in"] = true, ["local"] = true,
+    ["nil"] = true, ["not"] = true, ["or"] = true,
+    ["repeat"] = true, ["return"] = true, ["then"] = true,
+    ["true"] = true, ["until"] = true, ["while"] = true,
+    ["continue"] = true, ["export"] = true, ["type"] = true,
 }
 
-local function rrotate(x: number, n: number): number
-    return bit32.bor(bit32.rshift(x, n), bit32.lshift(x, 32 - n))
+local function isAlpha(c)
+    return c ~= "" and c:match("[%a_]") ~= nil
 end
 
-local function sha256Bytes(msg: string): string
-    local H: {number} = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19}
-    local bitLen: number = #msg * 8
-    msg = msg .. "\128"
-    while (#msg % 64) ~= 56 do
-        msg = msg .. "\0"
-    end
-    local lenBytes: {string} = {}
-    for i = 7, 0, -1 do
-        lenBytes[#lenBytes + 1] = string.char(math.floor(bitLen / (2 ^ (i * 8))) % 256)
-    end
-    msg = msg .. table.concat(lenBytes)
-
-    for chunkStart = 1, #msg, 64 do
-        local w: {number} = {}
-        for i = 0, 15 do
-            local base = chunkStart + i * 4
-            local b1, b2, b3, b4 = string.byte(msg, base, base + 3)
-            w[i] = bit32.bor(bit32.lshift(b1 :: number, 24), bit32.lshift(b2 :: number, 16), bit32.lshift(b3 :: number, 8), b4 :: number)
-        end
-        for i = 16, 63 do
-            local s0 = bit32.bxor(rrotate(w[i - 15], 7), rrotate(w[i - 15], 18), bit32.rshift(w[i - 15], 3))
-            local s1 = bit32.bxor(rrotate(w[i - 2], 17), rrotate(w[i - 2], 19), bit32.rshift(w[i - 2], 10))
-            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) % 4294967296
-        end
-        local a, b, c, d, e, f, g, h = H[1], H[2], H[3], H[4], H[5], H[6], H[7], H[8]
-        for i = 0, 63 do
-            local S1 = bit32.bxor(rrotate(e, 6), rrotate(e, 11), rrotate(e, 25))
-            local ch = bit32.bxor(bit32.band(e, f), bit32.band(bit32.bnot(e), g))
-            local t1 = (h + S1 + ch + K[i + 1] + w[i]) % 4294967296
-            local S0 = bit32.bxor(rrotate(a, 2), rrotate(a, 13), rrotate(a, 22))
-            local maj = bit32.bxor(bit32.band(a, b), bit32.band(a, c), bit32.band(b, c))
-            local t2 = (S0 + maj) % 4294967296
-            h = g; g = f; f = e
-            e = (d + t1) % 4294967296
-            d = c; c = b; b = a
-            a = (t1 + t2) % 4294967296
-        end
-        H[1] = (H[1] + a) % 4294967296
-        H[2] = (H[2] + b) % 4294967296
-        H[3] = (H[3] + c) % 4294967296
-        H[4] = (H[4] + d) % 4294967296
-        H[5] = (H[5] + e) % 4294967296
-        H[6] = (H[6] + f) % 4294967296
-        H[7] = (H[7] + g) % 4294967296
-        H[8] = (H[8] + h) % 4294967296
-    end
-    local out: {string} = {}
-    for i = 1, 8 do
-        out[#out + 1] = string.char(
-            math.floor(H[i] / 16777216) % 256,
-            math.floor(H[i] / 65536) % 256,
-            math.floor(H[i] / 256) % 256,
-            H[i] % 256
-        )
-    end
-    return table.concat(out)
+local function isAlnum(c)
+    return c ~= "" and c:match("[%w_]") ~= nil
 end
 
-function SecureCrypto.sha256(msg: string): string
-    return bytesToHex(sha256Bytes(msg))
+local function getLongBracket(source, i)
+    if source:sub(i, i) ~= "[" then
+        return nil
+    end
+
+    local j = i + 1
+
+    while source:sub(j, j) == "=" do
+        j = j + 1
+    end
+
+    if source:sub(j, j) == "[" then
+        return j - i - 1, j + 1
+    end
+
+    return nil
 end
 
-local function hmacSha256Bytes(key: string, msg: string): string
-    local blockSize = 64
-    if #key > blockSize then
-        key = sha256Bytes(key)
+local function readLong(source, i, level, bodyStart)
+    local close = "]" .. string.rep("=", level) .. "]"
+    local finish = source:find(close, bodyStart, true)
+
+    if not finish then
+        return source:sub(i), #source + 1
     end
-    if #key < blockSize then
-        key = key .. string.rep("\0", blockSize - #key)
-    end
-    local ipad: {string} = {}
-    local opad: {string} = {}
-    for i = 1, blockSize do
-        local b = string.byte(key, i) :: number
-        ipad[i] = string.char(bit32.bxor(b, 0x36))
-        opad[i] = string.char(bit32.bxor(b, 0x5c))
-    end
-    return sha256Bytes(table.concat(opad) .. sha256Bytes(table.concat(ipad) .. msg))
+
+    local nextIndex = finish + #close
+    return source:sub(i, nextIndex - 1), nextIndex
 end
 
-function SecureCrypto.hmacSha256(key: string, msg: string): string
-    return bytesToHex(hmacSha256Bytes(key, msg))
-end
+local function decodeQuotedLiteral(literal)
+    local body = literal:sub(2, -2)
+    local output = {}
+    local i = 1
 
-function SecureCrypto.pbkdf2(password: string, salt: string, iterations: number?, dkLen: number?): string
-    local iters: number = iterations or 10000
-    local keyLen: number = dkLen or 16
-    assert(type(iters) == "number" and iters >= 1, "iterations must be >= 1")
-    assert(type(keyLen) == "number" and keyLen >= 1, "dkLen must be >= 1")
-    local blocks = math.ceil(keyLen / 32)
-    local out: {string} = {}
-    for i = 1, blocks do
-        local blockIndex = string.char(
-            math.floor(i / 16777216) % 256,
-            math.floor(i / 65536) % 256,
-            math.floor(i / 256) % 256,
-            i % 256
-        )
-        local U = hmacSha256Bytes(password, salt .. blockIndex)
-        local T: {number} = {string.byte(U, 1, #U)}
-        for _ = 2, iters do
-            U = hmacSha256Bytes(password, U)
-            local ub: {number} = {string.byte(U, 1, #U)}
-            for j = 1, #T do
-                T[j] = bit32.bxor(T[j], ub[j])
+    while i <= #body do
+        local c = body:sub(i, i)
+
+        if c ~= "\\" then
+            output[#output + 1] = c
+            i = i + 1
+        else
+            local nextChar = body:sub(i + 1, i + 1)
+
+            if nextChar == "" then
+                return nil
+            elseif nextChar:match("%d") then
+                local digits = body:sub(i + 1):match("^(%d%d?%d?)")
+                output[#output + 1] =
+                    string.char(tonumber(digits) % 256)
+                i = i + 1 + #digits
+            elseif nextChar == "n" then
+                output[#output + 1] = "\n"
+                i = i + 2
+            elseif nextChar == "r" then
+                output[#output + 1] = "\r"
+                i = i + 2
+            elseif nextChar == "t" then
+                output[#output + 1] = "\t"
+                i = i + 2
+            elseif nextChar == "\\" or nextChar == "'" or nextChar == '"' then
+                output[#output + 1] = nextChar
+                i = i + 2
+            else
+                output[#output + 1] = "\\" .. nextChar
+                i = i + 2
             end
         end
-        local blockOut: {string} = {}
-        for j = 1, #T do
-            blockOut[j] = string.char(T[j])
+    end
+
+    return table.concat(output)
+end
+
+local function encodeString(value)
+    local output = {}
+
+    for i = 1, #value do
+        output[#output + 1] =
+            "\\" .. string.format("%03d", string.byte(value, i))
+    end
+
+    return '"' .. table.concat(output) .. '"'
+end
+
+local function tokenize(source)
+    local tokens = {}
+    local i = 1
+    local n = #source
+
+    while i <= n do
+        local c = source:sub(i, i)
+        local two = source:sub(i, i + 1)
+
+        if c:match("%s") then
+            local j = i + 1
+
+            while j <= n and source:sub(j, j):match("%s") do
+                j = j + 1
+            end
+
+            tokens[#tokens + 1] = {
+                kind = "space",
+                text = source:sub(i, j - 1)
+            }
+
+            i = j
+
+        elseif two == "--" then
+            local level, bodyStart =
+                getLongBracket(source, i + 2)
+
+            if level ~= nil then
+                local text, nextIndex =
+                    readLong(source, i, level, bodyStart)
+
+                tokens[#tokens + 1] = {
+                    kind = "comment",
+                    text = text
+                }
+
+                i = nextIndex
+            else
+                local j = source:find("[\r\n]", i + 2)
+
+                if not j then
+                    tokens[#tokens + 1] = {
+                        kind = "comment",
+                        text = source:sub(i)
+                    }
+
+                    i = n + 1
+                else
+                    tokens[#tokens + 1] = {
+                        kind = "comment",
+                        text = source:sub(i, j - 1)
+                    }
+
+                    i = j
+                end
+            end
+
+        elseif c == "'" or c == '"' then
+            local quote = c
+            local j = i + 1
+
+            while j <= n do
+                local ch = source:sub(j, j)
+
+                if ch == "\\" then
+                    j = j + 2
+                elseif ch == quote then
+                    j = j + 1
+                    break
+                else
+                    j = j + 1
+                end
+            end
+
+            tokens[#tokens + 1] = {
+                kind = "string",
+                text = source:sub(i, math.min(j - 1, n))
+            }
+
+            i = j
+
+        elseif c == "[" then
+            local level, bodyStart = getLongBracket(source, i)
+
+            if level ~= nil then
+                local text, nextIndex =
+                    readLong(source, i, level, bodyStart)
+
+                tokens[#tokens + 1] = {
+                    kind = "longstring",
+                    text = text
+                }
+
+                i = nextIndex
+            else
+                tokens[#tokens + 1] = {
+                    kind = "symbol",
+                    text = c
+                }
+
+                i = i + 1
+            end
+
+        elseif isAlpha(c) then
+            local j = i + 1
+
+            while j <= n and isAlnum(source:sub(j, j)) do
+                j = j + 1
+            end
+
+            local word = source:sub(i, j - 1)
+
+            tokens[#tokens + 1] = {
+                kind = KEYWORDS[word] and "keyword" or "identifier",
+                text = word
+            }
+
+            i = j
+
+        elseif c:match("%d") then
+            local j = i + 1
+
+            while j <= n and source:sub(j, j):match("[%w%.]") do
+                j = j + 1
+            end
+
+            tokens[#tokens + 1] = {
+                kind = "number",
+                text = source:sub(i, j - 1)
+            }
+
+            i = j
+
+        else
+            tokens[#tokens + 1] = {
+                kind = "symbol",
+                text = c
+            }
+
+            i = i + 1
         end
-        out[#out + 1] = table.concat(blockOut)
     end
-    return table.concat(out):sub(1, keyLen)
+
+    return tokens
 end
 
-local function bytesToHexLocal(s: string): string
-    return (s:gsub(".", function(c: string): string
-        return string.format("%02x", string.byte(c) :: number)
-    end))
-end
+function Obfuscator.Obfuscate(source, options)
+    assert(type(source) == "string", "source must be a string")
 
-local function hexToBytesLocal(hex: string): string
-    assert(#hex % 2 == 0 and hex:match("^%x*$") ~= nil, "invalid hex")
-    return (hex:gsub("%x%x", function(h: string): string
-        return string.char(tonumber(h, 16) :: number)
-    end))
-end
+    options = options or {}
 
-function SecureCrypto.newNonce(): string
-    local nonce = getRng()(12)
-    assert(type(nonce) == "string" and #nonce == 12, "random source must return 12 bytes")
-    return nonce
-end
+    local tokens = tokenize(source)
 
-local function u32le(n: number): string
-    n = n % 4294967296
-    return string.char(n % 256, math.floor(n / 256) % 256, math.floor(n / 65536) % 256, math.floor(n / 16777216) % 256)
-end
+    if options.EncodeStrings ~= false then
+        for _, token in ipairs(tokens) do
+            if token.kind == "string" then
+                local decoded = decodeQuotedLiteral(token.text)
 
-local function readU32le(s: string, i: number): number
-    local a,b,c,d = string.byte(s, i, i + 3)
-    return (a :: number) + (b :: number) * 256 + (c :: number) * 65536 + (d :: number) * 16777216
-end
-
-local function rotl(x: number, n: number): number
-    return bit32.bor(bit32.lshift(x, n), bit32.rshift(x, 32 - n))
-end
-
-local function quarterRound(x: {number}, a: number, b: number, c: number, d: number)
-    x[a] = (x[a] + x[b]) % 4294967296; x[d] = rotl(bit32.bxor(x[d], x[a]), 16)
-    x[c] = (x[c] + x[d]) % 4294967296; x[b] = rotl(bit32.bxor(x[b], x[c]), 12)
-    x[a] = (x[a] + x[b]) % 4294967296; x[d] = rotl(bit32.bxor(x[d], x[a]), 8)
-    x[c] = (x[c] + x[d]) % 4294967296; x[b] = rotl(bit32.bxor(x[b], x[c]), 7)
-end
-
-local function chachaBlock(key: string, counter: number, nonce: string): string
-    assert(#key == 32, "ChaCha20 key must be 32 bytes")
-    assert(#nonce == 12, "ChaCha20 nonce must be 12 bytes")
-    local x: {number} = {
-        0x61707865, 0x3320646e, 0x79622d32, 0x6b206574,
-    }
-    for i = 0, 7 do x[#x + 1] = readU32le(key, i * 4 + 1) end
-    x[#x + 1] = counter % 4294967296
-    for i = 0, 2 do x[#x + 1] = readU32le(nonce, i * 4 + 1) end
-    local initial: {number} = table.clone(x)
-    for _ = 1, 10 do
-        quarterRound(x, 1, 5, 9, 13); quarterRound(x, 2, 6, 10, 14); quarterRound(x, 3, 7, 11, 15); quarterRound(x, 4, 8, 12, 16)
-        quarterRound(x, 1, 6, 11, 16); quarterRound(x, 2, 7, 12, 13); quarterRound(x, 3, 8, 9, 14); quarterRound(x, 4, 5, 10, 15)
+                if decoded ~= nil then
+                    token.text = encodeString(decoded)
+                end
+            end
+        end
     end
-    local out: {string} = {}
-    for i = 1, 16 do out[i] = u32le(x[i] + initial[i]) end
-    return table.concat(out)
-end
 
-local function chacha20(data: string, key: string, nonce: string): string
-    assert(#key == 32 and #nonce == 12, "invalid key or nonce length")
-    local out: {string} = {}
-    local counter = 1 -- counter 0 reserved for AEAD in standard constructions
-    for pos = 1, #data, 64 do
-        assert(counter < 4294967296, "message too long")
-        local block = chachaBlock(key, counter, nonce)
-        local chunk = data:sub(pos, pos + 63)
-        local bytes: {string} = {}
-        for i = 1, #chunk do bytes[i] = string.char(bit32.bxor(string.byte(chunk, i) :: number, string.byte(block, i) :: number)) end
-        out[#out + 1] = table.concat(bytes)
-        counter += 1
+    local output = {}
+
+    for _, token in ipairs(tokens) do
+        output[#output + 1] = token.text
     end
-    return table.concat(out)
+
+    return table.concat(output)
 end
 
-local MAC_LABEL = "SecureCrypto-ChaCha20-HMAC-v1"
-local MAGIC = "SC20"
-local SALT_LEN = 16
-local NONCE_LEN = 12
-local TAG_LEN = 32
-
-local function deriveKeys(password: string, salt: string): (string, string)
-    assert(type(password) == "string" and #password > 0, "password cannot be empty")
-    local material = SecureCrypto.pbkdf2(password, salt, 10000, 64)
-    return material:sub(1, 32), material:sub(33, 64)
-end
-
-function SecureCrypto.encrypt(plain: string, password: string): string
-    assert(type(plain) == "string", "plain must be a string")
-    local salt = getRng()(SALT_LEN)
-    local nonce = SecureCrypto.newNonce()
-    assert(#salt == SALT_LEN, "random source must return 16 bytes")
-    local encKey, macKey = deriveKeys(password, salt)
-    local ciphertext = chacha20(plain, encKey, nonce)
-    local payload = MAGIC .. salt .. nonce .. ciphertext
-    local tag = hmacSha256Bytes(macKey, payload)
-    return bytesToHexLocal(payload .. tag)
-end
-
-function SecureCrypto.decrypt(encoded: string, password: string): string
-    assert(type(encoded) == "string", "encoded must be a string")
-    local raw = hexToBytesLocal(encoded)
-    assert(#raw >= #MAGIC + SALT_LEN + NONCE_LEN + TAG_LEN, "ciphertext too short")
-    assert(raw:sub(1, #MAGIC) == MAGIC, "unsupported ciphertext format")
-    local payload = raw:sub(1, #raw - TAG_LEN)
-    local tag = raw:sub(#raw - TAG_LEN + 1)
-    local saltStart = #MAGIC + 1
-    local salt = raw:sub(saltStart, saltStart + SALT_LEN - 1)
-    local nonceStart = saltStart + SALT_LEN
-    local nonce = raw:sub(nonceStart, nonceStart + NONCE_LEN - 1)
-    local encKey, macKey = deriveKeys(password, salt)
-    local expected = hmacSha256Bytes(macKey, payload)
-    local diff = 0
-    for i = 1, TAG_LEN do diff = bit32.bor(diff, bit32.bxor(string.byte(tag, i) :: number, string.byte(expected, i) :: number)) end
-    if diff ~= 0 then error("authentication failed: wrong password or modified ciphertext") end
-    local ciphertext = raw:sub(nonceStart + NONCE_LEN)
-    return chacha20(ciphertext, encKey, nonce)
-end
-
-SecureCrypto.Encrypt = SecureCrypto.encrypt
-SecureCrypto.Decrypt = SecureCrypto.decrypt
-
-return SecureCrypto
+return Obfuscator
