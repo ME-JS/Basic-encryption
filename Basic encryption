@@ -266,9 +266,14 @@ local function keyExpansion(key: string): {{number}}
 end
 
 local function addRoundKey(state: {{number}}, w: {{number}}, round: number)
+    local base = round * 4
     for c = 0, 3 do
+        local keyWord = w[base + c]
+        assert(keyWord ~= nil, "Missing AES round key")
         for r = 0, 3 do
-            state[c][r] = bit32.bxor(state[c][r], w[round * 4 + c + 1][r + 1])
+            local keyByte = keyWord[r + 1]
+            assert(keyByte ~= nil, "Missing AES key byte")
+            state[c][r] = bit32.bxor(state[c][r], keyByte)
         end
     end
 end
