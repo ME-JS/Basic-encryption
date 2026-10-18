@@ -172,300 +172,126 @@ function SecureCrypto.pbkdf2(password: string, salt: string, iterations: number?
     return table.concat(out):sub(1, keyLen)
 end
 
-function SecureCrypto.newIV(): string
-    local iv = getRng()(16)
-    assert(type(iv) == "string" and #iv == 16, "random source must return 16 bytes")
-    return iv
+local function bytesToHexLocal(s: string): string
+    return (s:gsub(".", function(c: string): string
+        return string.format("%02x", string.byte(c) :: number)
+    end))
 end
 
-function SecureCrypto.ivToHex(iv: string): string
-    assert(type(iv) == "string" and #iv == 16, "iv must be 16 bytes")
-    return bytesToHex(iv)
+local function hexToBytesLocal(hex: string): string
+    assert(#hex % 2 == 0 and hex:match("^%x*$") ~= nil, "invalid hex")
+    return (hex:gsub("%x%x", function(h: string): string
+        return string.char(tonumber(h, 16) :: number)
+    end))
 end
 
-function SecureCrypto.ivFromHex(hex: string): string
-    assert(type(hex) == "string" and #hex == 32 and hex:match("^%x+$") ~= nil, "iv hex must be 32 hex chars")
-    return hexToBytes(hex)
+function SecureCrypto.newNonce(): string
+    local nonce = getRng()(12)
+    assert(type(nonce) == "string" and #nonce == 12, "random source must return 12 bytes")
+    return nonce
 end
 
-local SBOX: {number} = {
-    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
-    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
-    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
-    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
-    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
-    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
-    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
-    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
-    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
-    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
-    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
-    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
-    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
-    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
-    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
-    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
-}
-local INV_SBOX: {number} = {}
-for i, v in ipairs(SBOX) do
-    INV_SBOX[v] = i - 1
+local function u32le(n: number): string
+    n = n % 4294967296
+    return string.char(n % 256, math.floor(n / 256) % 256, math.floor(n / 65536) % 256, math.floor(n / 16777216) % 256)
 end
 
-local RCON: {number} = {0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36}
+local function readU32le(s: string, i: number): number
+    local a,b,c,d = string.byte(s, i, i + 3)
+    return (a :: number) + (b :: number) * 256 + (c :: number) * 65536 + (d :: number) * 16777216
+end
 
-local INV_M: {{number}} = {
-    {14,11,13, 9},
-    { 9,14,11,13},
-    {13, 9,14,11},
-    {11,13, 9,14},
-}
+local function rotl(x: number, n: number): number
+    return bit32.bor(bit32.lshift(x, n), bit32.rshift(x, 32 - n))
+end
 
-local function mul(a: number, b: number): number
-    local p = 0
-    for _ = 1, 8 do
-        if bit32.band(b, 1) == 1 then
-            p = bit32.bxor(p, a)
-        end
-        local hi = bit32.band(a, 0x80)
-        a = bit32.lshift(a, 1)
-        if hi ~= 0 then
-            a = bit32.bxor(a, 0x1b)
-        end
-        a = bit32.band(a, 0xff)
-        b = bit32.rshift(b, 1)
+local function quarterRound(x: {number}, a: number, b: number, c: number, d: number)
+    x[a] = (x[a] + x[b]) % 4294967296; x[d] = rotl(bit32.bxor(x[d], x[a]), 16)
+    x[c] = (x[c] + x[d]) % 4294967296; x[b] = rotl(bit32.bxor(x[b], x[c]), 12)
+    x[a] = (x[a] + x[b]) % 4294967296; x[d] = rotl(bit32.bxor(x[d], x[a]), 8)
+    x[c] = (x[c] + x[d]) % 4294967296; x[b] = rotl(bit32.bxor(x[b], x[c]), 7)
+end
+
+local function chachaBlock(key: string, counter: number, nonce: string): string
+    assert(#key == 32, "ChaCha20 key must be 32 bytes")
+    assert(#nonce == 12, "ChaCha20 nonce must be 12 bytes")
+    local x: {number} = {
+        0x61707865, 0x3320646e, 0x79622d32, 0x6b206574,
+    }
+    for i = 0, 7 do x[#x + 1] = readU32le(key, i * 4 + 1) end
+    x[#x + 1] = counter % 4294967296
+    for i = 0, 2 do x[#x + 1] = readU32le(nonce, i * 4 + 1) end
+    local initial: {number} = table.clone(x)
+    for _ = 1, 10 do
+        quarterRound(x, 1, 5, 9, 13); quarterRound(x, 2, 6, 10, 14); quarterRound(x, 3, 7, 11, 15); quarterRound(x, 4, 8, 12, 16)
+        quarterRound(x, 1, 6, 11, 16); quarterRound(x, 2, 7, 12, 13); quarterRound(x, 3, 8, 9, 14); quarterRound(x, 4, 5, 10, 15)
     end
-    return p
-end
-
-local function keyExpansion(key: string): {{number}}
-    local w: {{number}} = {}
-    for i = 0, 3 do
-        w[i] = {
-            string.byte(key, i * 4 + 1) :: number,
-            string.byte(key, i * 4 + 2) :: number,
-            string.byte(key, i * 4 + 3) :: number,
-            string.byte(key, i * 4 + 4) :: number,
-        }
-    end
-    for i = 4, 43 do
-        local temp: {number} = {table.unpack(w[i - 1])}
-        if i % 4 == 0 then
-            local t = temp[1]
-            temp[1], temp[2], temp[3], temp[4] = temp[2], temp[3], temp[4], t
-            for j = 1, 4 do
-                temp[j] = SBOX[temp[j] + 1]
-            end
-            temp[1] = bit32.bxor(temp[1], RCON[i // 4])
-        end
-        w[i] = {}
-        for j = 1, 4 do
-            w[i][j] = bit32.bxor(w[i - 4][j], temp[j])
-        end
-    end
-    return w
-end
-
-local function addRoundKey(state: {{number}}, w: {{number}}, round: number)
-    local base = round * 4
-    for c = 0, 3 do
-        local keyWord = w[base + c]
-        assert(keyWord ~= nil, "Missing AES round key")
-        for r = 0, 3 do
-            local keyByte = keyWord[r + 1]
-            assert(keyByte ~= nil, "Missing AES key byte")
-            state[c][r] = bit32.bxor(state[c][r], keyByte)
-        end
-    end
-end
-
-local function subBytes(state: {{number}}, box: {number})
-    for c = 0, 3 do
-        for r = 0, 3 do
-            state[c][r] = box[state[c][r] + 1]
-        end
-    end
-end
-
-local function shiftRows(state: {{number}}, inv: boolean)
-    for r = 1, 3 do
-        local row: {number} = {}
-        for c = 0, 3 do
-            row[c] = state[c][r]
-        end
-        for c = 0, 3 do
-            local nc = inv and (c - r) % 4 or (c + r) % 4
-            state[c][r] = row[nc]
-        end
-    end
-end
-
-local function mixColumns(state: {{number}}, inv: boolean)
-    for c = 0, 3 do
-        local a: {number} = {state[c][0], state[c][1], state[c][2], state[c][3]}
-        for r = 0, 3 do
-            local v = 0
-            if inv then
-                for k = 0, 3 do
-                    v = bit32.bxor(v, mul(a[(r + k) % 4 + 1], INV_M[r + 1][k + 1]))
-                end
-            else
-                local m: {number} = {2, 3, 1, 1}
-                for k = 0, 3 do
-                    v = bit32.bxor(v, mul(a[(r + k) % 4 + 1], m[k + 1]))
-                end
-            end
-            state[c][r] = v
-        end
-    end
-end
-
-local function toState(block: string): {{number}}
-    local s: {{number}} = {}
-    for c = 0, 3 do
-        s[c] = {}
-        for r = 0, 3 do
-            s[c][r] = string.byte(block, c * 4 + r + 1) :: number
-        end
-    end
-    return s
-end
-
-local function fromState(s: {{number}}): string
     local out: {string} = {}
-    for c = 0, 3 do
-        for r = 0, 3 do
-            out[#out + 1] = string.char(s[c][r])
-        end
+    for i = 1, 16 do out[i] = u32le(x[i] + initial[i]) end
+    return table.concat(out)
+end
+
+local function chacha20(data: string, key: string, nonce: string): string
+    assert(#key == 32 and #nonce == 12, "invalid key or nonce length")
+    local out: {string} = {}
+    local counter = 1 -- counter 0 reserved for AEAD in standard constructions
+    for pos = 1, #data, 64 do
+        assert(counter < 4294967296, "message too long")
+        local block = chachaBlock(key, counter, nonce)
+        local chunk = data:sub(pos, pos + 63)
+        local bytes: {string} = {}
+        for i = 1, #chunk do bytes[i] = string.char(bit32.bxor(string.byte(chunk, i) :: number, string.byte(block, i) :: number)) end
+        out[#out + 1] = table.concat(bytes)
+        counter += 1
     end
     return table.concat(out)
 end
 
-local function encryptBlock(block: string, w: {{number}}): string
-    local s = toState(block)
-    addRoundKey(s, w, 0)
-    for round = 1, 9 do
-        subBytes(s, SBOX)
-        shiftRows(s, false)
-        mixColumns(s, false)
-        addRoundKey(s, w, round)
-    end
-    subBytes(s, SBOX)
-    shiftRows(s, false)
-    addRoundKey(s, w, 10)
-    return fromState(s)
+local MAC_LABEL = "SecureCrypto-ChaCha20-HMAC-v1"
+local MAGIC = "SC20"
+local SALT_LEN = 16
+local NONCE_LEN = 12
+local TAG_LEN = 32
+
+local function deriveKeys(password: string, salt: string): (string, string)
+    assert(type(password) == "string" and #password > 0, "password cannot be empty")
+    local material = SecureCrypto.pbkdf2(password, salt, 10000, 64)
+    return material:sub(1, 32), material:sub(33, 64)
 end
 
-local function decryptBlock(block: string, w: {{number}}): string
-    local s = toState(block)
-    addRoundKey(s, w, 10)
-    for round = 9, 1, -1 do
-        shiftRows(s, true)
-        subBytes(s, INV_SBOX)
-        addRoundKey(s, w, round)
-        mixColumns(s, true)
-    end
-    shiftRows(s, true)
-    subBytes(s, INV_SBOX)
-    addRoundKey(s, w, 0)
-    return fromState(s)
-end
-
-local function xorBlock(a: string, b: string): string
-    local out: {string} = {}
-    for i = 1, 16 do
-        out[i] = string.char(bit32.bxor(string.byte(a, i) :: number, string.byte(b, i) :: number))
-    end
-    return table.concat(out)
-end
-
-local function pad(data: string): string
-    local n = 16 - (#data % 16)
-    return data .. string.rep(string.char(n), n)
-end
-
-local function unpad(data: string): string
-    local n = string.byte(data, -1)
-    if not n or n < 1 or n > 16 or n > #data then
-        error("invalid padding")
-    end
-    for i = #data - n + 1, #data do
-        if string.byte(data, i) ~= n then
-            error("invalid padding")
-        end
-    end
-    return data:sub(1, #data - n)
-end
-
-function SecureCrypto.aesEncrypt(plain: string, key: string, iv: string): string
-    assert(#key == 16, "key must be 16 bytes")
-    assert(type(iv) == "string" and #iv == 16, "iv must be 16 bytes")
-    local w = keyExpansion(key)
-    local data = pad(plain)
-    local prev = iv
-    local out: {string} = {iv}
-    for i = 1, #data, 16 do
-        local block = xorBlock(data:sub(i, i + 15), prev)
-        local enc = encryptBlock(block, w)
-        out[#out + 1] = enc
-        prev = enc
-    end
-    return table.concat(out)
-end
-
-function SecureCrypto.aesDecrypt(cipher: string, key: string): string
-    assert(#key == 16, "key must be 16 bytes")
-    assert(#cipher >= 32 and #cipher % 16 == 0, "cipher too short or not aligned")
-    local w = keyExpansion(key)
-    local iv = cipher:sub(1, 16)
-    local data = cipher:sub(17)
-    local prev = iv
-    local out: {string} = {}
-    for i = 1, #data, 16 do
-        local block = data:sub(i, i + 15)
-        local dec = decryptBlock(block, w)
-        out[#out + 1] = xorBlock(dec, prev)
-        prev = block
-    end
-    return unpad(table.concat(out))
-end
-
-local MAC_LABEL = "SecureCrypto-MAC-v1"
-local MAC_TAG_LEN = 32
-
-function SecureCrypto.aesEncryptAuthenticated(plain: string, key: string, iv: string): string
-    assert(#key == 16, "key must be 16 bytes")
-    assert(type(iv) == "string" and #iv == 16, "iv must be 16 bytes")
-    local payload = SecureCrypto.aesEncrypt(plain, key, iv)
-    local macKey = sha256Bytes(MAC_LABEL .. key)
+function SecureCrypto.encrypt(plain: string, password: string): string
+    assert(type(plain) == "string", "plain must be a string")
+    local salt = getRng()(SALT_LEN)
+    local nonce = SecureCrypto.newNonce()
+    assert(#salt == SALT_LEN, "random source must return 16 bytes")
+    local encKey, macKey = deriveKeys(password, salt)
+    local ciphertext = chacha20(plain, encKey, nonce)
+    local payload = MAGIC .. salt .. nonce .. ciphertext
     local tag = hmacSha256Bytes(macKey, payload)
-    return payload .. tag
+    return bytesToHexLocal(payload .. tag)
 end
 
-function SecureCrypto.aesDecryptAuthenticated(cipher: string, key: string): string
-    assert(#key == 16, "key must be 16 bytes")
-    assert(#cipher >= 64 and #cipher % 16 == 0, "cipher too short or not aligned")
-    local payload = cipher:sub(1, #cipher - MAC_TAG_LEN)
-    local tag = cipher:sub(#cipher - MAC_TAG_LEN + 1)
-    local macKey = sha256Bytes(MAC_LABEL .. key)
+function SecureCrypto.decrypt(encoded: string, password: string): string
+    assert(type(encoded) == "string", "encoded must be a string")
+    local raw = hexToBytesLocal(encoded)
+    assert(#raw >= #MAGIC + SALT_LEN + NONCE_LEN + TAG_LEN, "ciphertext too short")
+    assert(raw:sub(1, #MAGIC) == MAGIC, "unsupported ciphertext format")
+    local payload = raw:sub(1, #raw - TAG_LEN)
+    local tag = raw:sub(#raw - TAG_LEN + 1)
+    local saltStart = #MAGIC + 1
+    local salt = raw:sub(saltStart, saltStart + SALT_LEN - 1)
+    local nonceStart = saltStart + SALT_LEN
+    local nonce = raw:sub(nonceStart, nonceStart + NONCE_LEN - 1)
+    local encKey, macKey = deriveKeys(password, salt)
     local expected = hmacSha256Bytes(macKey, payload)
     local diff = 0
-    for i = 1, MAC_TAG_LEN do
-        diff = bit32.bor(diff, bit32.bxor(string.byte(tag, i) :: number, string.byte(expected, i) :: number))
-    end
-    if diff ~= 0 then
-        error("MAC verification failed")
-    end
-    return SecureCrypto.aesDecrypt(payload, key)
+    for i = 1, TAG_LEN do diff = bit32.bor(diff, bit32.bxor(string.byte(tag, i) :: number, string.byte(expected, i) :: number)) end
+    if diff ~= 0 then error("authentication failed: wrong password or modified ciphertext") end
+    local ciphertext = raw:sub(nonceStart + NONCE_LEN)
+    return chacha20(ciphertext, encKey, nonce)
 end
 
-function SecureCrypto._encryptBlockForTest(block: string, key: string): string
-    assert(#block == 16 and #key == 16)
-    return encryptBlock(block, keyExpansion(key))
-end
-
-function SecureCrypto._decryptBlockForTest(block: string, key: string): string
-    assert(#block == 16 and #key == 16)
-    return decryptBlock(block, keyExpansion(key))
-end
+SecureCrypto.Encrypt = SecureCrypto.encrypt
+SecureCrypto.Decrypt = SecureCrypto.decrypt
 
 return SecureCrypto
